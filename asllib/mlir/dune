@@ -1,0 +1,13 @@
+(include_subdirs qualified)
+
+(library
+ (name asl_mlir)
+ (modules (:standard \ main))
+ (flags (:standard -w -42))
+ (libraries asllib zarith))
+
+(executable
+ (name main)
+ (modules main)
+ (flags (:standard -w -42))
+ (libraries asllib asl_mlir))
