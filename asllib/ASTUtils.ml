@@ -594,40 +594,110 @@ let list_flat_cross f li1 li2 =
   |> List.rev
 
 (* Begin SubstExpr *)
-let rec subst_expr substs e =
-  (* WARNING: only subst runtime vars. *)
+let rec subst_expr substs (e : expr) =
   let tr e = subst_expr substs e in
-  add_pos_from_st e
-  @@
+  let rebuild desc =
+    { e with desc; ty_opt = Option.map (subst_ty substs) e.ty_opt }
+  in
   match e.desc with
-  | E_Var s -> (
-      match List.assoc_opt s substs with None -> e.desc | Some e' -> e'.desc)
-  | E_Binop (op, e1, e2) -> E_Binop (op, tr e1, tr e2)
-  | E_Cond (e1, e2, e3) -> E_Cond (tr e1, tr e2, tr e3)
+  | E_Var name -> (
+      match List.assoc_opt name substs with
+      (* Actuals belong to the caller; do not substitute inside them again. *)
+      | Some actual -> actual
+      | None -> rebuild e.desc)
+  | E_Binop (op, e1, e2) -> rebuild (E_Binop (op, tr e1, tr e2))
+  | E_Cond (e1, e2, e3) -> rebuild (E_Cond (tr e1, tr e2, tr e3))
   | E_Call { name; args; params; call_type } ->
-      E_Call
-        {
-          name;
-          args = List.map tr args;
-          params = List.map tr params;
-          call_type;
-        }
-  | E_GetArray (e1, e2) -> E_GetArray (tr e1, tr e2)
-  | E_GetField (e, x) -> E_GetField (tr e, x)
-  | E_GetFields (e, fields) -> E_GetFields (tr e, fields)
+      rebuild
+        (E_Call
+           {
+             name;
+             args = List.map tr args;
+             params = List.map tr params;
+             call_type;
+           })
+  | E_GetArray (e1, e2) -> rebuild (E_GetArray (tr e1, tr e2))
+  | E_GetField (e, x) -> rebuild (E_GetField (tr e, x))
+  | E_GetFields (e, fields) -> rebuild (E_GetFields (tr e, fields))
   | E_GetCollectionFields _ -> failwith "No collection should be used here"
-  | E_GetItem (e, i) -> E_GetItem (tr e, i)
-  | E_Literal _ -> e.desc
-  | E_Pattern (e, ps) -> E_Pattern (tr e, ps)
+  | E_GetItem (e, i) -> rebuild (E_GetItem (tr e, i))
+  | E_Literal _ -> rebuild e.desc
+  | E_Pattern (e, (patterns, kind)) ->
+      rebuild
+        (E_Pattern (tr e, (List.map (subst_pattern substs) patterns, kind)))
   | E_Record (t, fields) ->
-      E_Record (t, List.map (fun (x, e) -> (x, tr e)) fields)
-  | E_Slice (e, slices) -> E_Slice (tr e, slices)
-  | E_Tuple es -> E_Tuple (List.map tr es)
+      rebuild
+        (E_Record (subst_ty substs t, List.map (fun (x, e) -> (x, tr e)) fields))
+  | E_Slice (e, slices) ->
+      rebuild (E_Slice (tr e, List.map (subst_slice substs) slices))
+  | E_Tuple es -> rebuild (E_Tuple (List.map tr es))
   | E_Array { length; value } ->
-      E_Array { length = tr length; value = tr value }
-  | E_ATC (e, t) -> E_ATC (tr e, t)
-  | E_Arbitrary _ -> e.desc
-  | E_Unop (op, e) -> E_Unop (op, tr e)
+      rebuild (E_Array { length = tr length; value = tr value })
+  | E_ATC (e, t) -> rebuild (E_ATC (tr e, subst_ty substs t))
+  | E_Arbitrary t -> rebuild (E_Arbitrary (subst_ty substs t))
+  | E_Unop (op, e) -> rebuild (E_Unop (op, tr e))
+
+and subst_ty substs (ty : ty) =
+  let tr e = subst_expr substs e in
+  let field (name, ty) = (name, subst_ty substs ty) in
+  let desc =
+    match ty.desc with
+    | T_Int (Parameterized name) -> (
+        match List.assoc_opt name substs with
+        | Some actual -> integer_exact' actual
+        | None -> ty.desc)
+    | T_Int (WellConstrained (constraints, precision)) ->
+        T_Int
+          (WellConstrained
+             (List.map (subst_constraint substs) constraints, precision))
+    | T_Bits (width, fields) ->
+        T_Bits (tr width, List.map (subst_bitfield substs) fields)
+    | T_Tuple tys -> T_Tuple (List.map (subst_ty substs) tys)
+    | T_Array (length, element) -> T_Array (tr length, subst_ty substs element)
+    | T_Record fields -> T_Record (List.map field fields)
+    | T_Exception fields -> T_Exception (List.map field fields)
+    | T_Collection fields -> T_Collection (List.map field fields)
+    | T_Int (UnConstrained | PendingConstrained)
+    | T_Real | T_String | T_Bool | T_Enum _ | T_Named _ ->
+        ty.desc
+  in
+  { ty with desc }
+
+and subst_constraint substs constraint_ =
+  let tr e = subst_expr substs e in
+  match constraint_ with
+  | Constraint_Exact e -> Constraint_Exact (tr e)
+  | Constraint_Range (lower, upper) -> Constraint_Range (tr lower, tr upper)
+
+and subst_slice substs slice =
+  let tr e = subst_expr substs e in
+  match slice with
+  | Slice_Single e -> Slice_Single (tr e)
+  | Slice_Range (upper, lower) -> Slice_Range (tr upper, tr lower)
+  | Slice_Length (offset, length) -> Slice_Length (tr offset, tr length)
+  | Slice_Star (factor, length) -> Slice_Star (tr factor, tr length)
+
+and subst_bitfield substs bitfield =
+  let slices = List.map (subst_slice substs) in
+  match bitfield with
+  | BitField_Simple (name, positions) -> BitField_Simple (name, slices positions)
+  | BitField_Nested (name, positions, fields) ->
+      BitField_Nested
+        (name, slices positions, List.map (subst_bitfield substs) fields)
+  | BitField_Type (name, positions, ty) ->
+      BitField_Type (name, slices positions, subst_ty substs ty)
+
+and subst_pattern substs (pattern : pattern) =
+  let tr e = subst_expr substs e in
+  let desc =
+    match pattern.desc with
+    | Pattern_All | Pattern_Mask _ -> pattern.desc
+    | Pattern_Geq e -> Pattern_Geq (tr e)
+    | Pattern_Leq e -> Pattern_Leq (tr e)
+    | Pattern_Range (lower, upper) -> Pattern_Range (tr lower, tr upper)
+    | Pattern_Single e -> Pattern_Single (tr e)
+  in
+  { pattern with desc }
 (* End *)
 
 let rec is_simple_expr e =

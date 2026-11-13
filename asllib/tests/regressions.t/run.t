@@ -50,7 +50,7 @@ Bad types:
     [23: 0] a,
     [10: 0, 3+: 2] b,
   };
-  ASL Static error (TE_BS): overlapping slices 0+:11, 3+:2.
+  ASL Static error (TE_BS): overlapping slices 0+:((10 - 0) + 1), 3+:2.
   [1]
 
   $ aslref bad-inclusion-in-symbolic-type.asl

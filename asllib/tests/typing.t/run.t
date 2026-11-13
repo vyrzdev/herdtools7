@@ -75,8 +75,8 @@ Use of global vars in constraints
   File TPositive4-1.asl, line 5, characters 4 to 54:
       let testB : integer {LET_ALLOWED_NUMS_B}     = 16;
       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  ASL Type error (TE_TSF): a subtype of integer {8} was expected,
-    provided integer {16}.
+  ASL Type error (TE_TSF): a subtype of integer {LET_ALLOWED_NUMS_B}
+    was expected, provided integer {16}.
   [1]
   $ aslref --no-exec TPositive4-2.asl
   File TPositive4-2.asl, line 8, characters 4 to 54:
@@ -428,7 +428,7 @@ C Tests
       var a : integer {0..N} = b; // illegal
       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
   ASL Type error (TE_TSF): a subtype of integer {0..N} was expected,
-    provided integer {-1}.
+    provided integer {(- 1)}.
   [1]
   $ aslref --no-exec CNegative2.asl
   File CNegative2.asl, line 4, characters 2 to 11:

@@ -339,13 +339,10 @@ val patch_with_backup : src:AST.t -> patches:AST.t -> AST.t
     the added prefix [_patched_]. *)
 
 val subst_expr : (identifier * expr) list -> expr -> expr
-(** [subst_expr substs e] replaces the variables used inside [e] by their
-    associated expression in [substs], if any.
+(** Substitute throughout the expression, embedded types and annotations.
+    Replacement expressions are inserted unchanged. *)
 
-    Warning: constants and statically-evaluated parts are not changed, for
-    example: [E_Slice (E_Var "y", [Slice_Single (E_Var "y")])] will become after
-    [subst_expr [("y", E_Var "x")]]:
-    [E_Slice (E_Var "x", [Slice_Single (E_Var "y")])] *)
+val subst_ty : (identifier * expr) list -> ty -> ty
 
 val rename_locals : (identifier -> identifier) -> AST.t -> AST.t
 (** [rename_locals f ast] is [ast] where all instances of variables [x] are

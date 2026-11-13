@@ -62,51 +62,35 @@ let rec list_mapi3 f i l1 l2 l3 =
       r :: list_mapi3 f (i + 1) l1 l2 l3
   | _, _, _ -> invalid_arg "List.mapi3"
 
-let sum = function
-  | [] -> zero_expr
-  | [ x ] -> x
-  | h :: t -> List.fold_left plus h t
+let width_plus acc w =
+  let annotate_width_literal width =
+    match (width.desc, width.ty_opt) with
+    | E_Literal (L_Int _), None -> with_ty_annot integer width
+    | _ -> width
+  in
+  let acc = annotate_width_literal acc in
+  let w = annotate_width_literal w in
+  plus acc w |> with_ty_annot integer
+
+let sum widths =
+  match widths with
+  | [] -> with_ty_annot integer zero_expr
+  | first :: rest -> List.fold_left width_plus first rest
 
 (* Begin SlicesWidth *)
-let slices_width env =
+let slices_width =
   let slice_width = function
     | Slice_Single _ -> one_expr
     | Slice_Star (_, e) | Slice_Length (_, e) -> e
     | Slice_Range (e1, e2) -> plus one_expr (minus e1 e2)
   in
-  fun li -> List.map slice_width li |> sum |> StaticModel.try_normalize env
+  fun li -> List.map slice_width li |> sum
 (* End *)
-
-let width_plus env acc w = plus acc w |> StaticModel.try_normalize env
 
 (* Begin RenameTyEqs *)
 let rename_ty_eqs : env -> (AST.identifier * AST.expr) list -> AST.ty -> AST.ty
     =
-  let subst_expr_normalize env eqs e =
-    subst_expr eqs e |> StaticModel.try_normalize env
-  in
-  let subst_constraint env eqs = function
-    | Constraint_Exact e -> Constraint_Exact (subst_expr_normalize env eqs e)
-    | Constraint_Range (e1, e2) ->
-        Constraint_Range
-          (subst_expr_normalize env eqs e1, subst_expr_normalize env eqs e2)
-  in
-  let subst_constraints env eqs = List.map (subst_constraint env eqs) in
-  let rec rename env eqs ty =
-    let loc = to_pos ty in
-    let here desc = add_pos_from ~loc desc in
-    match ty.desc with
-    | T_Bits (e, fields) ->
-        T_Bits (subst_expr_normalize env eqs e, fields) |> here
-    | T_Int (WellConstrained (constraints, precision)) ->
-        let constraints = subst_constraints env eqs constraints in
-        well_constrained ~loc ~precision constraints
-    | T_Int (Parameterized name) ->
-        let e = E_Var name |> here |> subst_expr_normalize env eqs in
-        integer_exact ~loc e
-    | T_Tuple tys -> T_Tuple (List.map (rename env eqs) tys) |> here
-    | _ -> ty
-  in
+  let rename _env eqs ty = subst_ty eqs ty in
   rename |: TypingRule.RenameTyEqs
 (* End *)
 
@@ -717,7 +701,7 @@ module Annotate (C : ANNOTATE_CONFIG) : S = struct
         when bitwidth_equal (StaticModel.equal_in_env env) w1 w2 ->
           T_Bits (w1, []) |> here
       | `BV_CONCAT, (T_Bits (w1, _), T_Bits (w2, _)) ->
-          T_Bits (width_plus env w1 w2, []) |> here
+          T_Bits (width_plus w1 w2, []) |> here
       | `STR_CONCAT, _ ->
           let+ () =
             check_true (Types.is_singular env t1) @@ fun () ->
@@ -1423,17 +1407,24 @@ module Annotate (C : ANNOTATE_CONFIG) : S = struct
   and annotate_symbolic_constrained_integer ~(loc : 'a annotated) env e =
     let t, e', ses = annotate_symbolically_evaluable_expr env e in
     let+ () = check_constrained_integer ~loc env t in
-    (StaticModel.try_normalize env e', ses)
+    (* Keep the typed expression; comparisons can normalise their own copy. *)
+    (e', ses)
   (* End *)
 
   (* Begin AnnotateConstraint *)
-  and annotate_constraint ~loc env = function
+  and annotate_constraint ~loc env constraint_ =
+    (* Polynomial reconstruction can introduce or erase DIV failures. *)
+    let annotate_bound e =
+      let t, e', ses = annotate_symbolically_evaluable_expr env e in
+      let+ () = check_constrained_integer ~loc env t in
+      (e', ses)
+    in
+    match constraint_ with
     | Constraint_Exact e ->
-        let e', ses = annotate_symbolic_constrained_integer ~loc env e in
+        let e', ses = annotate_bound e in
         (Constraint_Exact e', ses)
     | Constraint_Range (e1, e2) ->
-        let e1', ses1 = annotate_symbolic_constrained_integer ~loc env e1
-        and e2', ses2 = annotate_symbolic_constrained_integer ~loc env e2 in
+        let e1', ses1 = annotate_bound e1 and e2', ses2 = annotate_bound e2 in
         let ses = SES.union ses1 ses2 in
         (Constraint_Range (e1', e2'), ses)
   (* End *)
@@ -1457,9 +1448,10 @@ module Annotate (C : ANNOTATE_CONFIG) : S = struct
           annotate_slice (Slice_Length (i, one_expr)) |: TypingRule.Slice
       | Slice_Length (offset, length) ->
           let t_offset, offset', ses_offset = annotate_expr env offset
-          and length', ses_length =
-            annotate_symbolic_constrained_integer ~loc env length
+          and t_length, length', ses_length =
+            annotate_symbolically_evaluable_expr env length
           in
+          let+ () = check_constrained_integer ~loc env t_length in
           let+ () = check_is_readonly offset ses_offset in
           let+ () = check_is_readonly length ses_length in
           let+ () = check_underlying_integer ~loc:offset env t_offset in
@@ -2100,7 +2092,7 @@ module Annotate (C : ANNOTATE_CONFIG) : S = struct
                   best_effort (slices, SES.empty) (fun _ ->
                       annotate_slices env slices ~loc)
                 in
-                let w = slices_width env slices' in
+                let w = slices_width slices' in
                 let ses = SES.union ses1 ses2 in
                 (T_Bits (w, []) |> here, E_Slice (e'', slices') |> here, ses)
                 |: TypingRule.ESlice
@@ -2255,7 +2247,7 @@ module Annotate (C : ANNOTATE_CONFIG) : S = struct
                 let widths = List.map get_bitfield_width fields in
                 let e_slice_width =
                   let wh = List.hd widths and wts = List.tl widths in
-                  List.fold_left (width_plus env) wh wts
+                  List.fold_left width_plus wh wts
                 in
                 ( T_Bits (e_slice_width, []) |> here,
                   E_GetFields (e_base_annot, fields) |> here,
@@ -2278,7 +2270,7 @@ module Annotate (C : ANNOTATE_CONFIG) : S = struct
                 let widths = List.map get_bitfield_width fields in
                 let e_slice_width =
                   let wh = List.hd widths and wts = List.tl widths in
-                  List.fold_left (width_plus env) wh wts
+                  List.fold_left width_plus wh wts
                 in
                 ( T_Bits (e_slice_width, []) |> here,
                   E_GetCollectionFields (base_collection_name, fields) |> here,
@@ -2409,8 +2401,9 @@ module Annotate (C : ANNOTATE_CONFIG) : S = struct
             if length < 0 then fatal_from ~loc @@ Error.BaseValueEmptyType t
             else L_BitVector (Bitvector.zeros length) |> lit
         | _ ->
-            let slice = Slice_Length (zero_expr, e) in
-            E_Slice (zero_expr, [ slice ]) |> here)
+            let zero = with_ty_annot (integer_exact zero_expr) zero_expr in
+            let slice = Slice_Length (zero, e) in
+            E_Slice (zero, [ slice ]) |> here)
     | T_Enum [] -> assert false
     | T_Enum (name :: _) -> lookup_constant env name |> lit
     | T_Int UnConstrained -> zero_expr
@@ -2561,9 +2554,7 @@ module Annotate (C : ANNOTATE_CONFIG) : S = struct
               best_effort (slices, SES.empty) @@ fun _ ->
               annotate_slices env slices ~loc
             in
-            let width =
-              slices_width env slices_annotated |> StaticModel.try_normalize env
-            in
+            let width = slices_width slices_annotated in
             let t = T_Bits (width, []) |> here in
             let+ () = check_type_satisfies ~loc env t_e t in
             let+ () = check_disjoint_slices ~loc env slices_annotated in
@@ -2631,7 +2622,7 @@ module Annotate (C : ANNOTATE_CONFIG) : S = struct
          (* Begin LESetBitField *)
          | T_Bits (_, bitfields) ->
              let bits slices bitfields =
-               T_Bits (slices_width env slices, bitfields) |> here
+               T_Bits (slices_width slices, bitfields) |> here
              in
              let t, slices =
                match find_bitfield_opt field bitfields with
@@ -3020,12 +3011,10 @@ module Annotate (C : ANNOTATE_CONFIG) : S = struct
           | T_Int UnConstrained, T_Int _ | T_Int _, T_Int UnConstrained ->
               UnConstrained
           | T_Int _, T_Int _ ->
-              let start_n = StaticModel.try_normalize env start_e'
-              and end_n = StaticModel.try_normalize env end_e' in
               let e_bot, e_top =
                 match dir with
-                | Up -> (start_n, end_n)
-                | Down -> (end_n, start_n)
+                | Up -> (start_e', end_e')
+                | Down -> (end_e', start_e')
               in
               WellConstrained
                 ([ Constraint_Range (e_bot, e_top) ], Precision_Full)
