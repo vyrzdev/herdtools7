@@ -15,6 +15,13 @@ type some_source_type = | SourceType : 'kind Target.source_type -> some_source_t
 
 let (let*) = Result.bind
 
+let require_kind : type k other.
+    k Target.kind -> other Target.annotated_expr ->
+    (k Target.annotated_expr, error) result =
+ fun kind expr ->
+  match kind, Target.kind_of_expression expr with
+  | Target.Integer, Target.Integer -> Ok expr
+
 let normalise_expression_literal literal =
   match literal with
   | Source.L_Int value ->

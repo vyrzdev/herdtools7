@@ -1,4 +1,4 @@
 (executable
  (name aslmlir)
  (public_name aslmlir)
- (libraries asllib))
+ (libraries asllib typed_ast))

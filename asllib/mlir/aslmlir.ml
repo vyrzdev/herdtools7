@@ -18,9 +18,9 @@ let run files =
 
   (* Normalise the typed AST.t *)
   match Pipeline.run typed_ast with
-  | Ok () -> 0
-  | Error Pipeline.Unimplemented ->
-      Format.eprintf "TypedAST normalisation is not implemented.@.";
+  | Ok _ -> 0
+  | Error error ->
+      Format.eprintf "%a@." Pipeline.pp_error error;
       1
 
 let () =
