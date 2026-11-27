@@ -32,6 +32,7 @@ let rec normalise_term ~env (expr: Source.expr) =
 and normalise_term_binop ~env op left right =
   match op with
   | `ADD -> normalise_term_binop_add ~env left right
+  | `MUL -> normalise_term_binop_mul ~env left right
   | _ -> Error Common.Unimplemented
 
 and normalise_term_binop_add ~env left right =
@@ -44,6 +45,16 @@ and normalise_term_binop_add ~env left right =
     | Target.Integer -> (
       Ok (Term (Target.IntegerAdd (left, right) : Target.integer Target.term))
     )
+  )
+
+and normalise_term_binop_mul ~env left right =
+  let* Term left = normalise_term ~env left in
+  let* Term right = normalise_term ~env right in
+  match Target.kind_of_term left with
+  | Target.Integer -> (
+    match Target.kind_of_term right with
+    | Target.Integer ->
+      Ok (Term (Target.IntegerMul (left, right) : Target.integer Target.term))
   )
 
 let normalise_integer_constraint ~env = function

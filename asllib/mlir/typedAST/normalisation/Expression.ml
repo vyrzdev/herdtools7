@@ -46,23 +46,44 @@ let normalise_expression_var ~env ~annotation name =
     )
   | None, _ | _, None -> Error (Violation 5)
 
-let rec normalise_integer_source_constraint ~env = function
-  | Source.Constraint_Exact expr -> (
-      let* Expression expr = normalise_source_expression ~env expr in
-      match Target.kind_of_expression expr with
-      | Target.Integer ->
-        Ok ((expr, expr) :
-          Target.integer Target.annotated_expr * Target.integer Target.annotated_expr)
+let normalise_integer_root_annotated ~env annotation expr =
+  let* judgement = Term.normalise_integer_annotation ~env annotation in
+  let* Term.Term term = Term.normalise_term ~env expr in
+  match Target.kind_of_term term with
+  | Target.Integer ->
+      Ok (Target.RootAnnotated (judgement, term) : Target.integer Target.source_bound)
+
+let rec normalise_integer_source_bound ~env (expr : Source.expr) =
+  match expr.Source.ty_opt with
+  | Some annotation -> (
+      match expr.Source.desc with
+      (* A bound may reduce to a literal while retaining a wider annotation.
+         Keep that annotation rather than using the literal's singleton type. *)
+      | Source.E_Literal _ | Source.E_Var _ ->
+          normalise_integer_root_annotated ~env annotation expr
+      | Source.E_Binop (_, left, right) -> (
+          (* Symbolic normalisation rebuilds both operands without annotations,
+             or returns the original expression with both annotations intact. *)
+          match left.Source.ty_opt, right.Source.ty_opt with
+          | Some _, Some _ ->
+              let* Expression expr = normalise_source_expression ~env expr in
+              let* expr = require_kind Target.Integer expr in
+              Ok (Target.Annotated expr)
+          | None, None -> normalise_integer_root_annotated ~env annotation expr
+          | Some _, None | None, Some _ -> Error (Violation 12)
+        )
+      | _ -> Error Unimplemented
     )
+  | None -> Error (Violation 11) (* Expected the checked source bound's root annotation. *)
+
+and normalise_integer_source_constraint ~env = function
+  | Source.Constraint_Exact expr ->
+      let* expr = normalise_integer_source_bound ~env expr in
+      Ok (expr, expr)
   | Source.Constraint_Range (lower, upper) ->
-      let* Expression lower = normalise_source_expression ~env lower in
-      let* Expression upper = normalise_source_expression ~env upper in
-      match Target.kind_of_expression lower with
-      | Target.Integer -> (match Target.kind_of_expression upper with
-        | Target.Integer ->
-          Ok ((lower, upper) :
-            Target.integer Target.annotated_expr * Target.integer Target.annotated_expr)
-      )
+      let* lower = normalise_integer_source_bound ~env lower in
+      let* upper = normalise_integer_source_bound ~env upper in
+      Ok (lower, upper)
 
 and normalise_integer_source_constraints ~env = function
   | [] -> Ok []

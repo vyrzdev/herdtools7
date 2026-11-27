@@ -6,13 +6,14 @@ type _ kind =
 (* TODO: Constructor names overlap; some uses need explicit types
    to disambiguate them. *)
 
-(* Source types contain annotated expressions; judgement bounds contain terms.
-   Terms retain their kind but carry no further typing annotations.
+(* Terms retain their kind but carry no further typing annotations.
    Giving a reference N its full singleton judgement integer {N} would
    introduce another N requiring the same judgement. *)
 type 'kind term =
   | IntegerLiteral : Z.t -> integer term
   | IntegerAdd : integer term * integer term -> integer term
+  (* Symbolic normalisation can turn n+n into 2*n. *)
+  | IntegerMul : integer term * integer term -> integer term
   (* Carry a kind value so consumers can match on it when the index is abstract.
      The Reference constructor alone does not determine the kind. *)
   | Reference : 'kind kind * string -> 'kind term
@@ -20,6 +21,7 @@ type 'kind term =
 let kind_of_term : type k. k term -> k kind = function
   | IntegerLiteral _ -> Integer
   | IntegerAdd _ -> Integer
+  | IntegerMul _ -> Integer
   | Reference (kind, _) -> kind
 
 type 'kind typing_judgement =
@@ -38,11 +40,20 @@ type 'kind annotated_expr =
   | Reference : 'kind typing_judgement * string -> 'kind annotated_expr
   | Arbitrary : 'kind source_type -> 'kind annotated_expr
 
+(* Symbolic normalisation handles our literal/reference/ADD bounds. It copies
+   the original type annotation onto the new root, leaving its operands unannotated.
+   However, it would leave some expressions, e.g. n MOD 2, unchanged,
+   including their operand annotations.
+   Implement Annotated now for such bounds when we support them. *)
+and 'kind source_bound =
+  | Annotated of 'kind annotated_expr
+  | RootAnnotated of 'kind typing_judgement * 'kind term
+
 (* TODO: Working name! *)
 and 'kind source_type =
    (* Each pair is an inclusive (lower, upper) range; the list is their union.
       For simplicity, a singleton x is normalised to (x, x). *)
- | IntegerConstrained : (integer annotated_expr * integer annotated_expr) list -> integer source_type
+ | IntegerConstrained : (integer source_bound * integer source_bound) list -> integer source_type
  | IntegerUnconstrained : integer source_type
 
 let kind_of_source_type : type k. k source_type -> k kind = function
